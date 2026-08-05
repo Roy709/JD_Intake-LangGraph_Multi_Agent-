@@ -35,7 +35,7 @@ llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
 REQUIRED_FIELDS = ["title", "company", "location", "exp", "work_mode"]
 QUALITY_THRESHOLD = 75
 MAX_REVISIONS = 2
-MAX_MISSING_INFO_ATTEMPTS = 2
+MAX_MISSING_INFO_ATTEMPTS = 6  # fields are asked one at a time, so this is a total-question cap, not a round cap
 
 
 class JDState(TypedDict):
@@ -102,29 +102,37 @@ def parse_jd(state: JDState) -> dict:
 
 
 def route_after_parse(state: JDState) -> str:
-    """Plain Python, not an LLM decision: are required fields present, and have we already asked enough?"""
+    """Plain Python, not an LLM decision: are required fields present at all?"""
+    return "request_missing_info" if state["missing_fields"] else "check_duplicate"
+
+
+def request_missing_info(state: JDState) -> dict:
+    """Pauses the graph (interrupt) and asks a human for ONE missing field at a time.
+
+    The reply is taken verbatim as that field's value - no re-parsing needed, so
+    this doesn't loop back through `parse_jd` at all. No side effects happen before
+    `interrupt()`: on resume, the node re-runs from the top, so anything before the
+    interrupt call would otherwise execute twice.
+    """
+    field = state["missing_fields"][0]
+    reply = interrupt({"field": field, "question": f"What is the {field}?"})
+
+    parsed = {**state["parsed"], field: str(reply).strip()}
+    return {
+        "parsed": parsed,
+        "missing_fields": state["missing_fields"][1:],
+        "missing_info_attempts": state.get("missing_info_attempts", 0) + 1,
+        "log": _log(state, f"request_missing_info: got '{field}' from the recruiter"),
+    }
+
+
+def route_after_request_missing_info(state: JDState) -> str:
+    """Plain Python: still fields left to ask, or have we already asked too many times?"""
     if state["missing_fields"]:
         if state.get("missing_info_attempts", 0) >= MAX_MISSING_INFO_ATTEMPTS:
             return "escalate"
         return "request_missing_info"
     return "check_duplicate"
-
-
-def request_missing_info(state: JDState) -> dict:
-    """Pauses the graph (interrupt) and asks a human to fill in the missing fields.
-
-    No side effects happen before `interrupt()` — on resume, the node re-runs from the
-    top, so anything before the interrupt call would otherwise execute twice.
-    """
-    reply = interrupt({
-        "missing_fields": state["missing_fields"],
-        "question": f"Missing fields: {', '.join(state['missing_fields'])}. Please provide them.",
-    })
-    return {
-        "raw_jd": state["raw_jd"] + "\n" + str(reply),
-        "missing_info_attempts": state.get("missing_info_attempts", 0) + 1,
-        "log": _log(state, "request_missing_info: got a reply from the recruiter"),
-    }
 
 
 def check_duplicate(state: JDState) -> dict:
@@ -214,7 +222,7 @@ def reject(state: JDState) -> dict:
 
 
 def escalate(state: JDState) -> dict:
-    """Terminal: too many missing-info rounds, or too many failed quality revisions.
+    """Terminal: too many missing-info questions asked, or too many failed quality revisions.
 
     Either way this pipeline gives up and hands off to a human outside the graph —
     it does not auto-reject a JD just because the LLM couldn't polish it in time.
@@ -245,7 +253,11 @@ def build_graph(checkpointer):
         "escalate": "escalate",
         "check_duplicate": "check_duplicate",
     })
-    graph.add_edge("request_missing_info", "parse_jd")
+    graph.add_conditional_edges("request_missing_info", route_after_request_missing_info, {
+        "request_missing_info": "request_missing_info",
+        "escalate": "escalate",
+        "check_duplicate": "check_duplicate",
+    })
     graph.add_conditional_edges("check_duplicate", route_after_duplicate_check, {
         "reject": "reject",
         "score_quality": "score_quality",

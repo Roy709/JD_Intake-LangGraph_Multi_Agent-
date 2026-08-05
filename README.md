@@ -51,18 +51,19 @@ Submit a JD:
 python jd_intake_pipeline.py "Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs."
 ```
 
-If required fields are missing, the pipeline **pauses and exits** rather than blocking on input:
+If required fields are missing, the pipeline asks for them **one at a time** and exits after each question, rather than blocking on input or asking for everything at once:
 ```
 [thread_id: 8f2a...]
 
-[PAUSED] Missing fields: location, exp, work_mode. Please provide them.
+[PAUSED] What is the location?
 Resume with: python jd_intake_pipeline.py --resume <thread_id> "<your answer>"
 ```
 
 Resume it — in the same terminal, a new terminal, or after restarting your machine — with:
 ```bash
-python jd_intake_pipeline.py --resume 8f2a... "Bangalore, 3 years, remote"
+python jd_intake_pipeline.py --resume 8f2a... "Bangalore"
 ```
+If another field is still missing, it'll pause again asking for the next one. Once every required field has an answer, it proceeds straight to duplicate checking (no re-parsing needed, since each answer is taken verbatim).
 
 This is deliberately **two separate process invocations**, not one interactive loop. The pipeline's state is persisted to `checkpoints.sqlite` (via LangGraph's `SqliteSaver`) keyed by `thread_id` — that's what makes it possible to genuinely kill the process and resume later. An in-process `while` loop calling `input()` would look similar but wouldn't prove persistence actually works.
 
@@ -89,7 +90,7 @@ class JDState(TypedDict):
 | Node | Does |
 |---|---|
 | `parse_jd` | LLM structured extraction → `parsed`, flags `missing_fields` |
-| `request_missing_info` | `interrupt()` — pauses, asks a human for the gaps, merges the reply back into `raw_jd` |
+| `request_missing_info` | `interrupt()` — pauses, asks a human for one missing field, sets it directly in `parsed` |
 | `check_duplicate` | Plain DB lookup (exact match on lowercased title+company) → sets `duplicate_of` |
 | `score_quality` | LLM scores clarity, specificity, bias-free language → `quality_score` + feedback |
 | `rewrite_jd` | Rewrites using the feedback → `rewritten_jd`, increments `revision_count` |
@@ -101,9 +102,12 @@ class JDState(TypedDict):
 
 ```
 START → parse_jd
-parse_jd  ──[missing fields, attempts < 2]──→ request_missing_info → parse_jd   # loop back
-          ├─[missing fields, attempts ≥ 2]──→ escalate
-          └─[complete]──────────────────────→ check_duplicate
+parse_jd  ──[fields missing]──→ request_missing_info (asks ONE field)
+          └─[complete]────────→ check_duplicate
+
+request_missing_info ──[fields still missing, attempts < 6]──→ request_missing_info   # ask next field
+                      ├─[fields still missing, attempts ≥ 6]──→ escalate
+                      └─[all fields collected]─────────────────→ check_duplicate
 
 check_duplicate ──[duplicate]──→ reject
                 └─[unique]─────→ score_quality
@@ -123,6 +127,7 @@ Two things worth noticing: **the duplicate check and both retry caps are plain P
 - **Exact-match lowercase fields, not regex.** Day 1's job search tool crashed when an unescaped keyword hit MongoDB's `$regex`. `jobs_db.py` here compares precomputed `title_lower`/`company_lower` fields instead — safer and faster.
 - **`SqliteSaver`, not `MemorySaver`.** Only a persistent checkpointer survives a process restart, which is the whole point of the pause/resume demo.
 - **`escalate` is shared** by both the missing-info cap and the quality-revision cap, rather than two separate "give up" nodes — same outcome (hand off to a human), one node.
+- **Missing fields are asked one at a time, not all at once.** Each answer is taken verbatim and written directly into `parsed` — no re-parsing, no loop back through `parse_jd`. Simpler, fewer LLM calls, and it reads like a normal short Q&A instead of one dense "please provide: X, Y, Z" prompt.
 
 ## Project Structure
 
