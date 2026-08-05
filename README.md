@@ -51,21 +51,25 @@ Submit a JD:
 python jd_intake_pipeline.py "Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs."
 ```
 
-If required fields are missing, the pipeline asks for them **one at a time** and exits after each question, rather than blocking on input or asking for everything at once:
+If required fields are missing, the pipeline asks for them **one at a time**, right there in the terminal:
 ```
 [thread_id: 8f2a...]
 
-[PAUSED] What is the location?
-Resume with: python jd_intake_pipeline.py --resume <thread_id> "<your answer>"
+What is the location?
+>
 ```
+Type your answer and press enter; if another field is still missing, it asks for that one next. Once every required field has an answer, it proceeds straight to duplicate checking (no re-parsing needed, since each answer is taken verbatim).
 
-Resume it — in the same terminal, a new terminal, or after restarting your machine — with:
-```bash
-python jd_intake_pipeline.py --resume 8f2a... "Bangalore"
-```
-If another field is still missing, it'll pause again asking for the next one. Once every required field has an answer, it proceeds straight to duplicate checking (no re-parsing needed, since each answer is taken verbatim).
+### Proving it survives being killed
 
-This is deliberately **two separate process invocations**, not one interactive loop. The pipeline's state is persisted to `checkpoints.sqlite` (via LangGraph's `SqliteSaver`) keyed by `thread_id` — that's what makes it possible to genuinely kill the process and resume later. An in-process `while` loop calling `input()` would look similar but wouldn't prove persistence actually works.
+The interactive loop above is the normal path — but the whole reason this uses a persistent `SqliteSaver` checkpointer (not `MemorySaver`) is that the pipeline's state doesn't live in that Python process at all; it's in `checkpoints.sqlite`, keyed by `thread_id`. To prove that:
+
+1. Submit a JD with missing fields, get asked a question, then **close the terminal entirely** instead of answering (or `Ctrl+C`).
+2. Open a **new** terminal and resume with:
+   ```bash
+   python jd_intake_pipeline.py --resume 8f2a... "Bangalore"
+   ```
+   using the `thread_id` printed in step 1. It picks up exactly where it left off - a genuinely different process, not an in-memory loop that only looks persistent.
 
 ## State
 

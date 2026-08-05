@@ -277,24 +277,31 @@ def build_graph(checkpointer):
 
 # ─── CLI runner ────────────────────────────────────────────────────────────────
 #
-# Deliberately two separate commands, not one interactive loop: the checkpointer
-# (SqliteSaver, writing to checkpoints.sqlite) is what makes it possible to pause
-# here, exit the process entirely, and resume later - potentially from a whole
-# new `python` invocation - by thread_id alone. A single in-process while-loop
-# would "work" but wouldn't actually prove that.
+# Default mode is interactive: pauses just prompt for input right there in the
+# same process, like any normal CLI tool. `--resume` is kept as a separate,
+# explicit mode for the one demo that actually needs two process invocations:
+# proving the pipeline survives being killed and resumed later, purely from
+# checkpoints.sqlite plus a thread_id. Day-to-day use should never need it.
 
-def report(result: dict) -> None:
-    if "__interrupt__" in result:
-        question = result["__interrupt__"][0].value["question"]
-        print(f"\n[PAUSED] {question}")
-        print("Resume with: python jd_intake_pipeline.py --resume <thread_id> \"<your answer>\"")
-        return
-
+def report_final(result: dict) -> None:
     print(f"\nStatus: {result['status']}")
     for line in result["log"]:
         print(f"  - {line}")
     if result["status"] == "published":
         print(f"\nPublished job_id: {result['job_id']}")
+
+
+def run_interactive(app, raw_jd: str, thread_id: str) -> None:
+    config = {"configurable": {"thread_id": thread_id}}
+    print(f"[thread_id: {thread_id}]")
+    result = app.invoke({"raw_jd": raw_jd}, config=config)
+
+    while "__interrupt__" in result:
+        question = result["__interrupt__"][0].value["question"]
+        reply = input(f"\n{question}\n> ")
+        result = app.invoke(Command(resume=reply), config=config)
+
+    report_final(result)
 
 
 if __name__ == "__main__":
@@ -309,17 +316,20 @@ if __name__ == "__main__":
             reply = " ".join(sys.argv[3:])
             config = {"configurable": {"thread_id": thread_id}}
             result = app.invoke(Command(resume=reply), config=config)
-            report(result)
+
+            while "__interrupt__" in result:
+                question = result["__interrupt__"][0].value["question"]
+                reply = input(f"\n{question}\n> ")
+                result = app.invoke(Command(resume=reply), config=config)
+
+            report_final(result)
 
         elif len(sys.argv) >= 2:
             thread_id = str(uuid.uuid4())
             raw_jd_input = " ".join(sys.argv[1:])
-            config = {"configurable": {"thread_id": thread_id}}
-            print(f"[thread_id: {thread_id}]")
-            result = app.invoke({"raw_jd": raw_jd_input}, config=config)
-            report(result)
+            run_interactive(app, raw_jd_input, thread_id)
 
         else:
             print('Usage: python jd_intake_pipeline.py "<raw job description text>"')
-            print('       python jd_intake_pipeline.py --resume <thread_id> "<your answer>"')
+            print('       python jd_intake_pipeline.py --resume <thread_id> "<your answer>"  (after killing a paused run)')
             sys.exit(1)
