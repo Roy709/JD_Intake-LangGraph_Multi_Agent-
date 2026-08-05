@@ -1,0 +1,48 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# LangGraph checkpointer state (local run history, not app data)
+*.sqlite
+*.sqlite-*
+
+# Local setup guide
+setup_guide_local.md
+SETUP_GUIDE_LOCAL.md
+
+# Virtual environment
+myenv/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/

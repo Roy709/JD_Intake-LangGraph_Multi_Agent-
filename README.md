@@ -1,0 +1,148 @@
+# LangGraph Multi-Agent — JD Intake Pipeline
+
+A companion repo to [Ai_Agent_new](https://github.com/alumnx-ai-labs/Ai_Agent_new), teaching **LangGraph** instead of LangChain's `create_agent()`.
+
+**Important framing:** despite the repo name, this example is not "agents talking to agents." Every node here is a deterministic step — some plain Python (duplicate check, routing rules), some a single LLM call for one specific job (extraction, scoring, rewriting). None of them reason over their own tools in a loop the way Day 1's agent did. The lesson is **LangGraph as a workflow engine**: explicit typed state, conditional branching, bounded retry loops, and a human-in-the-loop pause — not multi-agent orchestration.
+
+## The Use Case
+
+Recruiters submit messy job descriptions (JDs) — incomplete, duplicate, vague, or biased. Rather than let a raw JD hit the database unchecked, this pipeline cleans, scores, deduplicates, and only then publishes it — asking a human for help when it can't proceed alone.
+
+## Setup
+
+### 1. Clone the repo
+```bash
+git clone https://github.com/alumnx-ai-labs/LangGraph_Multi_Agent.git
+cd LangGraph_Multi_Agent
+```
+
+### 2. Create and activate a virtual environment
+```bash
+python -m venv myenv
+myenv\Scripts\activate      # Windows
+# source myenv/bin/activate # macOS/Linux
+```
+
+### 3. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Get a free Gemini API key
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey) — sign in, **Create API key**.
+
+### 5. Get a free MongoDB Atlas cluster
+Same as `Ai_Agent_new` — see that repo's README for the full walkthrough (sign up, free M0 cluster, database user, IP allowlist, connection string). This pipeline uses a different database name (`jd_intake_db`), so it won't collide with Day 1's data even on the same cluster.
+
+### 6. Set up `.env`
+```bash
+cp .env.example .env
+```
+Fill in:
+```env
+GOOGLE_API_KEY=your_gemini_api_key_here
+MONGO_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/
+```
+
+## Usage
+
+Submit a JD:
+```bash
+python jd_intake_pipeline.py "Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs."
+```
+
+If required fields are missing, the pipeline **pauses and exits** rather than blocking on input:
+```
+[thread_id: 8f2a...]
+
+[PAUSED] Missing fields: location, exp, work_mode. Please provide them.
+Resume with: python jd_intake_pipeline.py --resume <thread_id> "<your answer>"
+```
+
+Resume it — in the same terminal, a new terminal, or after restarting your machine — with:
+```bash
+python jd_intake_pipeline.py --resume 8f2a... "Bangalore, 3 years, remote"
+```
+
+This is deliberately **two separate process invocations**, not one interactive loop. The pipeline's state is persisted to `checkpoints.sqlite` (via LangGraph's `SqliteSaver`) keyed by `thread_id` — that's what makes it possible to genuinely kill the process and resume later. An in-process `while` loop calling `input()` would look similar but wouldn't prove persistence actually works.
+
+## State
+
+```python
+class JDState(TypedDict):
+    raw_jd: str
+    parsed: dict                # title, company, location, exp, work_mode
+    missing_fields: list
+    missing_info_attempts: int
+    quality_score: int
+    quality_feedback: str
+    rewritten_jd: str
+    revision_count: int
+    duplicate_of: Optional[str]
+    status: str                 # published | rejected | needs_input
+    job_id: Optional[str]
+    log: list                   # audit trail of what each node did
+```
+
+## Nodes
+
+| Node | Does |
+|---|---|
+| `parse_jd` | LLM structured extraction → `parsed`, flags `missing_fields` |
+| `request_missing_info` | `interrupt()` — pauses, asks a human for the gaps, merges the reply back into `raw_jd` |
+| `check_duplicate` | Plain DB lookup (exact match on lowercased title+company) → sets `duplicate_of` |
+| `score_quality` | LLM scores clarity, specificity, bias-free language → `quality_score` + feedback |
+| `rewrite_jd` | Rewrites using the feedback → `rewritten_jd`, increments `revision_count` |
+| `publish_job` | Writes to MongoDB → `job_id`, status `published` |
+| `reject` | Terminal: duplicate found |
+| `escalate` | Terminal: missing-info or quality-revision attempts exhausted, status `needs_input` |
+
+## Edges
+
+```
+START → parse_jd
+parse_jd  ──[missing fields, attempts < 2]──→ request_missing_info → parse_jd   # loop back
+          ├─[missing fields, attempts ≥ 2]──→ escalate
+          └─[complete]──────────────────────→ check_duplicate
+
+check_duplicate ──[duplicate]──→ reject
+                └─[unique]─────→ score_quality
+
+score_quality ──[score ≥ 75]────────────────────→ publish_job
+              ├─[score < 75, revisions < 2]─────→ rewrite_jd → score_quality   # self-improvement loop
+              └─[score < 75, revisions ≥ 2]─────→ escalate
+
+publish_job → END      reject → END      escalate → END
+```
+
+Two things worth noticing: **the duplicate check and both retry caps are plain Python conditionals, not LLM decisions** — a duplicate is a fact, not a judgment call, and a circuit breaker you can't trust an LLM to enforce on itself isn't a circuit breaker. And **both loops (missing-info, quality-rewrite) land on the same `escalate` node** when they run out — this pipeline never auto-rejects a JD just because it couldn't get it polished or complete in time; it hands off to a human instead.
+
+## Design decisions worth knowing
+
+- **MongoDB, not a second database.** The duplicate check is a simple two-field lookup with no joins — doesn't need anything relational, and reuses the Atlas account already set up for Day 1.
+- **Exact-match lowercase fields, not regex.** Day 1's job search tool crashed when an unescaped keyword hit MongoDB's `$regex`. `jobs_db.py` here compares precomputed `title_lower`/`company_lower` fields instead — safer and faster.
+- **`SqliteSaver`, not `MemorySaver`.** Only a persistent checkpointer survives a process restart, which is the whole point of the pause/resume demo.
+- **`escalate` is shared** by both the missing-info cap and the quality-revision cap, rather than two separate "give up" nodes — same outcome (hand off to a human), one node.
+
+## Project Structure
+
+```
+LangGraph_Multi_Agent/
+├── jd_intake_pipeline.py   # The graph: state, nodes, edges, CLI
+├── jobs_db.py              # MongoDB: duplicate check + publish
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── .env                    # Your API keys (not tracked in git)
+```
+
+## Troubleshooting
+
+### MongoDB `ServerSelectionTimeoutError` / SSL handshake failures
+Almost always a missing IP allowlist entry, not a connectivity bug — Atlas rejects the TLS handshake for non-allowlisted IPs with an error that looks like a generic SSL failure. Check **Network Access** in Atlas and add your current IP.
+
+### Garbled characters (mojibake) in output
+Fixed via `sys.stdout.reconfigure(encoding="utf-8")` at the top of `jd_intake_pipeline.py` — Gemini's replies can contain accented characters, and Windows consoles don't default to UTF-8 stdout.
+
+### "No GOOGLE_API_KEY found" / "MONGO_URI environment variable is not set"
+See `Ai_Agent_new`'s README troubleshooting section — same causes, same fixes.
