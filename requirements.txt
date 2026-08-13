@@ -4,3 +4,4 @@ langchain-google-genai
 python-dotenv
 requests
 pymongo
+flask

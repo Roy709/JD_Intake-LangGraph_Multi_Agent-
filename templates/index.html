@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JD Intake Pipeline</title>
+<style>
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(135deg, #eef2ff, #f8fafc);
+    min-height: 100vh;
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+
+  .app {
+    width: 100%;
+    max-width: 640px;
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 10px 30px rgba(30, 41, 59, 0.08);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 80vh;
+  }
+
+  header {
+    padding: 20px 24px;
+    background: linear-gradient(135deg, #4338ca, #6366f1);
+    color: white;
+  }
+
+  header h1 {
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+  }
+
+  header p {
+    margin: 4px 0 0;
+    font-size: 0.85rem;
+    opacity: 0.85;
+  }
+
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: #f8fafc;
+  }
+
+  #chat:empty::before {
+    content: "Paste a job description to get started.";
+    color: #94a3b8;
+    font-size: 0.9rem;
+    margin: auto;
+    text-align: center;
+  }
+
+  .msg {
+    padding: 10px 14px;
+    border-radius: 14px;
+    max-width: 78%;
+    white-space: pre-wrap;
+    line-height: 1.45;
+    font-size: 0.95rem;
+    box-shadow: 0 1px 2px rgba(30, 41, 59, 0.06);
+  }
+
+  .user {
+    background: #4338ca;
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+  }
+
+  .assistant {
+    background: white;
+    color: #1e293b;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+    border: 1px solid #e2e8f0;
+  }
+
+  .assistant.thinking {
+    color: #94a3b8;
+    font-style: italic;
+  }
+
+  .assistant.paused {
+    border-color: #f59e0b;
+    background: #fffbeb;
+  }
+
+  form {
+    display: flex;
+    gap: 10px;
+    padding: 16px 20px;
+    background: white;
+    border-top: 1px solid #e2e8f0;
+  }
+
+  input {
+    flex: 1;
+    padding: 12px 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  input:focus {
+    border-color: #6366f1;
+  }
+
+  button {
+    padding: 0 20px;
+    border: none;
+    border-radius: 10px;
+    background: #4338ca;
+    color: white;
+    font-weight: 600;
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  button:hover:not(:disabled) {
+    background: #3730a3;
+  }
+
+  button:disabled {
+    background: #c7d2fe;
+    cursor: default;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <h1>JD Intake Pipeline</h1>
+    <p>Paste a job description - the pipeline parses, dedupes, scores, and publishes it</p>
+  </header>
+
+  <div id="chat"></div>
+
+  <form id="chat-form">
+    <input id="message" type="text" placeholder="Paste a job description..." autocomplete="off">
+    <button id="send-btn" type="submit">Send</button>
+  </form>
+</div>
+
+<script>
+const chat = document.getElementById("chat");
+const form = document.getElementById("chat-form");
+const input = document.getElementById("message");
+const sendBtn = document.getElementById("send-btn");
+
+// null = no pipeline run in progress; the next message starts a fresh submission.
+// set = the pipeline is paused waiting on an answer for this thread.
+let currentThreadId = null;
+
+function addMessage(role, text, extraClass) {
+  const div = document.createElement("div");
+  div.className = "msg " + role + (extraClass ? " " + extraClass : "");
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message) return;
+
+  addMessage("user", message);
+  input.value = "";
+  sendBtn.disabled = true;
+
+  const thinking = addMessage("assistant", "Thinking...", "thinking");
+
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, thread_id: currentThreadId }),
+    });
+    const data = await res.json();
+
+    thinking.textContent = data.reply;
+    thinking.classList.remove("thinking");
+    thinking.classList.toggle("paused", !data.done);
+
+    currentThreadId = data.thread_id;
+    if (!data.done) {
+      input.placeholder = "Your answer...";
+    } else {
+      input.placeholder = "Paste a job description...";
+    }
+  } catch (err) {
+    thinking.textContent = "Error: could not reach the pipeline.";
+    thinking.classList.remove("thinking");
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+</script>
+
+</body>
+</html>

@@ -30,6 +30,16 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 load_dotenv(override=True)
 
+# LangSmith tracing hangs indefinitely on networks that block smith.langchain.com
+# (LangChain's callback pipeline tries to reach it synchronously on the first
+# traced call, with no timeout). LANGSMITH_TRACING=false in .env isn't enough -
+# some tracing paths key off LANGSMITH_API_KEY just being *present*. Force it off
+# here so ChatGoogleGenerativeAI.invoke() never takes that path.
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ.pop("LANGSMITH_API_KEY", None)
+os.environ.pop("LANGCHAIN_API_KEY", None)
+
 llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
 
 REQUIRED_FIELDS = ["title", "company", "location", "exp", "work_mode"]
