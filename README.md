@@ -46,6 +46,16 @@ MONGO_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/
 
 ## Usage
 
+### Web UI
+
+A minimal Flask chat UI wraps the same pipeline:
+```bash
+python app.py
+```
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000) and paste a JD into the chat. If required fields are missing, the assistant asks for them one at a time — just reply in the input box. Under the hood, each browser conversation gets its own LangGraph `thread_id`: the first submission starts a fresh run, and every reply while a question is pending resumes that same paused thread via `Command(resume=...)`, all backed by the same `checkpoints.sqlite` the CLI uses below.
+
+### CLI
+
 Submit a JD:
 ```bash
 python jd_intake_pipeline.py "Senior Backend Engineer at Acme, Bangalore, 5+ years, hybrid. Building our core platform APIs."
@@ -139,6 +149,9 @@ Two things worth noticing: **the duplicate check and both retry caps are plain P
 LangGraph_Multi_Agent/
 ├── jd_intake_pipeline.py   # The graph: state, nodes, edges, CLI
 ├── jobs_db.py              # MongoDB: duplicate check + publish
+├── app.py                  # Flask chat UI over the same graph
+├── templates/
+│   └── index.html          # Chat frontend (vanilla JS, no build step)
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
@@ -155,3 +168,19 @@ Fixed via `sys.stdout.reconfigure(encoding="utf-8")` at the top of `jd_intake_pi
 
 ### "No GOOGLE_API_KEY found" / "MONGO_URI environment variable is not set"
 See `Ai_Agent_new`'s README troubleshooting section — same causes, same fixes.
+
+### Every LLM call hangs forever (LangSmith tracing enabled)
+If `LANGSMITH_TRACING=true` and requests to `ChatGoogleGenerativeAI` never return — no error, no timeout, just stuck — this is **not** a network problem. Confirmed via thread-dump (`faulthandler.dump_traceback_later`): the hang is in `platform.win32_ver()`, called synchronously by LangChain's tracer (`get_runtime_environment()` on the first traced event) to attach OS metadata to the trace. On Python 3.14 + certain Windows setups, `win32_ver()`'s WMI query never returns — this blocks the main thread before any request reaches LangSmith's servers (which, on their own, are reachable fine).
+
+This code forces tracing off unconditionally at import time (see the comment above `os.environ["LANGCHAIN_TRACING_V2"]` near the top of `jd_intake_pipeline.py`) specifically to avoid this, regardless of what `.env` says.
+
+To get tracing back:
+1. Check whether WMI itself is the problem — from an elevated PowerShell: `Get-Service Winmgmt`. If it's not `Running`, that's likely your actual fix; restart it and retest.
+2. If WMI is healthy but this still hangs, it may be specific to Python 3.14's `platform.win32_ver()` implementation — try a Python 3.11–3.13 virtualenv instead.
+3. Once either is confirmed fixed, remove the `os.environ[...]` overrides in `jd_intake_pipeline.py` to let `.env`'s `LANGSMITH_TRACING` take effect again.
+
+Quick isolated repro, no LangChain involved, to confirm this on your own machine:
+```bash
+python -c "import platform; print(platform.win32_ver())"
+```
+If that alone hangs, it's this issue.

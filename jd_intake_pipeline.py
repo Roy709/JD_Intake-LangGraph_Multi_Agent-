@@ -30,11 +30,16 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 load_dotenv(override=True)
 
-# LangSmith tracing hangs indefinitely on networks that block smith.langchain.com
-# (LangChain's callback pipeline tries to reach it synchronously on the first
-# traced call, with no timeout). LANGSMITH_TRACING=false in .env isn't enough -
-# some tracing paths key off LANGSMITH_API_KEY just being *present*. Force it off
-# here so ChatGoogleGenerativeAI.invoke() never takes that path.
+# LangSmith tracing hangs indefinitely on this stack - confirmed via thread-dump,
+# it's NOT a network issue (smith.langchain.com is reachable fine). The tracer's
+# on_chat_model_start() calls langchain_core.env.get_runtime_environment(), which
+# calls platform.win32_ver(); on Python 3.14 + this Windows setup that makes a WMI
+# query that never returns. Any traced LLM call hangs forever, right there in the
+# main thread, before a single byte reaches LangSmith. See README Troubleshooting
+# for how to check whether this affects you and how to re-enable tracing.
+# LANGSMITH_TRACING=false in .env isn't enough on its own - some tracing paths key
+# off LANGSMITH_API_KEY just being *present*. Force both off here so
+# ChatGoogleGenerativeAI.invoke() never takes that path.
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ.pop("LANGSMITH_API_KEY", None)
