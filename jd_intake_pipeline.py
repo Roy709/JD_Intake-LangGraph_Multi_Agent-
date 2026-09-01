@@ -15,6 +15,7 @@ import sys
 import uuid
 from typing import Optional, TypedDict
 
+import requests
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -65,6 +66,7 @@ class JDState(TypedDict):
     duplicate_of: Optional[str]
     status: str
     job_id: Optional[str]
+    rag_ingest_status: Optional[str]
     log: list
 
 
@@ -228,6 +230,39 @@ def publish_job(state: JDState) -> dict:
     }
 
 
+def ingest_jd_to_rag(state: JDState) -> dict:
+    description = state.get("rewritten_jd") or state["raw_jd"]
+    
+    # Grab job_id cleanly from state
+    job_id = state.get("job_id", "unknown_id")
+    
+    payload = {
+        "job_id": str(job_id),
+        "title": state["parsed"].get("title", ""),
+        "company": state["parsed"].get("company", ""),
+        "location": state["parsed"].get("location", ""),
+        "exp": state["parsed"].get("exp", ""),
+        "work_mode": state["parsed"].get("work_mode", ""),
+        "description": description
+    }
+    
+    rag_url = os.getenv("RAG_INGEST_URL", "http://localhost:8000/api/ingest-jd")
+    
+    try:
+        response = requests.post(rag_url, json=payload, timeout=10)
+        if response.status_code == 200:
+            status_note = "successfully embedded & stored JD vectors in Pinecone via RAG service"
+        else:
+            status_note = f"RAG service responded with status {response.status_code}: {response.text}"
+    except Exception as err:
+        status_note = f"failed to trigger RAG service ({err})"
+
+    return {
+        "rag_ingest_status": status_note,
+        "log": _log(state, f"ingest_jd_to_rag: {status_note}")
+    }
+
+
 def reject(state: JDState) -> dict:
     """Terminal: duplicate postings are auto-rejected, no human judgment needed."""
     return {
@@ -259,6 +294,7 @@ def build_graph(checkpointer):
     graph.add_node("score_quality", score_quality)
     graph.add_node("rewrite_jd", rewrite_jd)
     graph.add_node("publish_job", publish_job)
+    graph.add_node("ingest_jd_to_rag", ingest_jd_to_rag)
     graph.add_node("reject", reject)
     graph.add_node("escalate", escalate)
 
@@ -283,7 +319,8 @@ def build_graph(checkpointer):
         "escalate": "escalate",
     })
     graph.add_edge("rewrite_jd", "score_quality")
-    graph.add_edge("publish_job", END)
+    graph.add_edge("publish_job", "ingest_jd_to_rag")
+    graph.add_edge("ingest_jd_to_rag", END)
     graph.add_edge("reject", END)
     graph.add_edge("escalate", END)
 
